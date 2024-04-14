@@ -1,78 +1,74 @@
-#include<iostream>
-#include <cstring>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <filesystem>
+#include <iostream>
 #include <fstream>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <cstring>
+#include <sys/stat.h>
+
+#define PORT 8080
+#define SERVER_FILES_DIR "./serverFiles/"
 
 using namespace std;
-namespace fs = filesystem;
-string directory = "./serverFiles/";
-int main(){
-    int serverSocket = socket(AF_INET,SOCK_DGRAM,0);
-    if(serverSocket==-1){
-        cout<<"Error creating server socket"<<endl;
-        close(serverSocket);
+
+int main() {
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+    struct sockaddr_in servaddr, cliaddr;
+    char buffer[1024];
+
+    // memset(&servaddr, 0, sizeof(servaddr));
+    // memset(&cliaddr, 0, sizeof(cliaddr));
+
+    // Filling server information
+    servaddr.sin_family = AF_INET; // IPv4
+    servaddr.sin_addr.s_addr = INADDR_ANY;
+    servaddr.sin_port = htons(PORT);
+
+    // Bind the socket with the server address
+    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+        cerr<<"bind failed"<<endl;
+        close(sockfd);
         return -1;
     }
 
-    sockaddr_in serverAddress;
-    serverAddress.sin_family=AF_INET;
-    serverAddress.sin_addr.s_addr=inet_addr("127.0.0.1");
-    serverAddress.sin_port=htons(3000);
+    int len, n;
+    len = sizeof(cliaddr);
 
+    while (true) {
+        n = recvfrom(sockfd, (char *)buffer, sizeof(buffer), MSG_WAITALL, (struct sockaddr *)&cliaddr, (socklen_t*)&len);
+        buffer[n] = '\0';
 
-    if(bind(serverSocket,(struct sockaddr*)&serverAddress,sizeof(serverAddress))==-1){
-        cout<<"Error binding socket to server"<<endl;
-        close(serverSocket);
-        return -1;
-    }
+        string filePath = SERVER_FILES_DIR + string(buffer);
 
-    cout<<"Server ready"<<endl;
-
-    sockaddr_in clientAddress;
-    socklen_t clientAddLen=sizeof(clientAddress);
-    while(true){
-        char buff[1024];
-        ssize_t bytesRecieved = recvfrom(serverSocket,buff,sizeof(buff),0,(struct sockaddr*)&clientAddress,&clientAddLen);
-        if(bytesRecieved==-1){
-            cout<<"Error recieving fileName"<<endl;
+        ifstream file(filePath, ios::binary);
+        if (!file.is_open()) {
+            cout << "File not found: " << filePath << endl;
+            
+            sendto(sockfd, "-1", 2, MSG_CONFIRM, (const struct sockaddr *)&cliaddr, len);
             continue;
         }
-        buff[bytesRecieved]='\0';
-        cout<<"File requested : "<<buff<<endl;
-        string filePath = directory+buff;
-        if(fs::exists(filePath)){
-            ifstream inputFile(filePath,ios::binary);
-            if(inputFile.is_open()){
-                inputFile.seekg(0,ios::end);
-                streampos fileSize=inputFile.tellg();
-                inputFile.seekg(0,ios::beg);
 
-                char *fileContent = new char[static_cast<size_t>(fileSize)];
-
-                inputFile.read(fileContent,fileSize);
-                inputFile.close();
-
-                ssize_t bytesSend = sendto(serverSocket,fileContent,strlen(fileContent),0,(struct sockaddr*)&clientAddress,clientAddLen);
-                if(bytesSend==-1){
-                    cout<<"Error sending file"<<endl;
-                }
-                else{
-                    cout<<"File sent successfully"<<endl;
-                }
-
-                delete [] fileContent;
-            }
+        struct stat fileStat;
+        if (stat(filePath.c_str(), &fileStat) < 0) {
+            cout << "Error getting file size." << endl;
+            continue;
         }
-        else{
-            char message[1024] = "-1";
-            ssize_t bytesSend = sendto(serverSocket,message,strlen(message),0,(struct sockaddr*)&clientAddress,clientAddLen);
-            if(bytesSend==-1){
-                cout<<"Error sending response message"<<endl;
-            }
+
+        int fileSize = fileStat.st_size;
+        sendto(sockfd, &fileSize, sizeof(fileSize), MSG_CONFIRM, (const struct sockaddr *)&cliaddr, len);
+
+        char fileBuffer[1024];
+        while (!file.eof()) {
+            file.read(fileBuffer, sizeof(fileBuffer));
+            sendto(sockfd, fileBuffer, file.gcount(), MSG_CONFIRM, (const struct sockaddr *)&cliaddr, len);
         }
+
+        file.close();
     }
 
-    close(serverSocket);
+    return 0;
 }
